@@ -7,18 +7,21 @@ import { request } from 'undici';
 import { v4 as uuid } from 'uuid';
 import * as shelljs from 'shelljs';
 import LruCache from 'lru-cache';
+import AdmZip from 'adm-zip';
 import { toLower, endsWith, range, uniq, split, first } from 'lodash';
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, CacheType, Client, ComponentType, GatewayIntentBits, Interaction, Message, PermissionsBitField, TextChannel } from 'discord.js';
 
 import { InputState } from './util';
 import { CoreType, emulate } from './emulate';
 
+const ZIP = ['zip'];
+
 const NES = ['nes'];
 const SNES = ['sfc', 'smc'];
 const GB = ['gb', 'gbc'];
 const GBA = ['gba'];
 
-const ALL = [...NES, ...SNES, ...GB, ...GBA];
+const ALL = [...NES, ...SNES, ...GB, ...GBA, ...ZIP];
 
 const pool = new Piscina({
     filename: path.resolve(__dirname, path.resolve(__dirname, 'worker.ts')),
@@ -85,52 +88,69 @@ const main = async () => {
             return;
         }
 
-        let coreType: CoreType;
-        if (NES.find(ext => endsWith(toLower(attachment.name), ext))) {
-            coreType = CoreType.NES;
-        } else if (SNES.find(ext => endsWith(toLower(attachment.name), ext))) {
-            coreType = CoreType.SNES;
-        } else if (GB.find(ext => endsWith(toLower(attachment.name), ext))) {
-            coreType = CoreType.GB;
-        } else if (GBA.find(ext => endsWith(toLower(attachment.name), ext))) {
-            coreType = CoreType.GBA;
-        } else {
-            return;
-        }
-
         const { body } = await request(attachment.url);
-        const buffer = Buffer.from(await body.arrayBuffer());
+        try {
+            var buffer = Buffer.from(await body.arrayBuffer());
+            const id = uuid().slice(0, 5);
 
-        const id = uuid().slice(0, 5);
+            const data = path.resolve('data', id);
+            shelljs.mkdir('-p', data);
 
-        const data = path.resolve('data', id);
-        shelljs.mkdir('-p', data);
+            const gameFile = path.join(data, attachment.name);
+            fs.writeFileSync(gameFile, buffer);
 
-        const gameFile = path.join(data, attachment.name);
-        fs.writeFileSync(gameFile, buffer);
+            if (endsWith(toLower(attachment.name), "zip")) {
+                var zip = new AdmZip(gameFile);
+                var zipEntries = zip.getEntries();
+                zip.extractEntryTo(zipEntries[0], data);
 
-        const info = {
-            game: attachment.name,
-            coreType,
-            guild: message.guildId,
-            channelId: message.channelId
-        };
+                var romName = zipEntries[0].entryName;
+                const romPath = path.resolve(data, romName);
+                console.log("Extracted rom to: ", romPath);
+                // now read the extracted rom back in
+                buffer = fs.readFileSync(romPath);
+            } else {
+                var romName = attachment.name;
+            }
 
-        const infoFile = path.join(data, 'info.json');
-        fs.writeFileSync(infoFile, JSON.stringify(info, null, 4));
+            let coreType: CoreType;
+            if (NES.find(ext => endsWith(toLower(romName), ext))) {
+                coreType = CoreType.NES;
+            } else if (SNES.find(ext => endsWith(toLower(romName), ext))) {
+                coreType = CoreType.SNES;
+            } else if (GB.find(ext => endsWith(toLower(romName), ext))) {
+                coreType = CoreType.GB;
+            } else if (GBA.find(ext => endsWith(toLower(romName), ext))) {
+                coreType = CoreType.GBA;
+            } else {
+                return;
+            }
 
-        const { recording, recordingName, state } = await emulate(pool, coreType, buffer, null, []);
+            const info = {
+                game: romName,
+                coreType,
+                guild: message.guildId,
+                channelId: message.channelId
+            };
 
-        const stateFile = path.join(data, 'state.sav');
-        fs.writeFileSync(stateFile, state);
+            const infoFile = path.join(data, 'info.json');
+            fs.writeFileSync(infoFile, JSON.stringify(info, null, 4));
 
-        await message.channel.send({
-            files: [{
-                attachment: recording,
-                name: recordingName
-            }],
-            components: buttons(coreType, id, 1, true),
-        });
+            const { recording, recordingName, state } = await emulate(pool, coreType, buffer, null, []);
+
+            const stateFile = path.join(data, 'state.sav');
+            fs.writeFileSync(stateFile, state);
+
+            await message.channel.send({
+                files: [{
+                    attachment: recording,
+                    name: recordingName
+                }],
+                components: buttons(coreType, id, 1, true),
+            });
+        } catch (err) {
+            console.error(err);
+        }
     });
 
     client.on('interactionCreate', async (interaction: Interaction<CacheType>) => {
